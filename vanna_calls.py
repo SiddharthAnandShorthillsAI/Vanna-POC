@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import pandas as pd
 from dotenv import load_dotenv
 from vanna.weaviate import WeaviateDatabase
 from vanna.base import VannaBase
@@ -153,6 +154,39 @@ def setup_vanna_with_custom_db(db_path: str):
         st.error(f"❌ Error setting up Vanna with custom database: {str(e)}")
         return None
 
+# Helper function to clean SQL formatting
+def clean_sql_formatting(sql: str) -> str:
+    """Clean SQL by removing markdown formatting and language identifiers"""
+    if not sql:
+        return sql
+        
+    cleaned_sql = sql.strip()
+    
+    # Remove markdown code block formatting
+    if cleaned_sql.startswith('```'):
+        lines = cleaned_sql.split('\n')
+        # Remove lines that start with ``` 
+        cleaned_lines = []
+        for line in lines:
+            if not line.strip().startswith('```'):
+                cleaned_lines.append(line)
+        cleaned_sql = '\n'.join(cleaned_lines).strip()
+    
+    # Remove language identifiers like 'sqlite', 'sql', etc.
+    first_line = cleaned_sql.split('\n')[0].strip().lower()
+    if first_line in ['sqlite', 'sql']:
+        # Remove the first line if it's just a language identifier
+        remaining_lines = cleaned_sql.split('\n')[1:]
+        cleaned_sql = '\n'.join(remaining_lines).strip()
+    elif cleaned_sql.lower().startswith('sqlite '):
+        # Remove 'sqlite ' prefix
+        cleaned_sql = cleaned_sql[7:].strip()
+    elif cleaned_sql.lower().startswith('sql '):
+        # Remove 'sql ' prefix
+        cleaned_sql = cleaned_sql[4:].strip()
+    
+    return cleaned_sql
+
 @st.cache_data(show_spinner="Generating sample questions ...")
 def generate_questions_cached():
     vn = setup_vanna()
@@ -162,7 +196,9 @@ def generate_questions_cached():
 @st.cache_data(show_spinner="Generating SQL query ...")
 def generate_sql_cached(question: str):
     vn = setup_vanna()
-    return vn.generate_sql(question=question, allow_llm_to_see_data=True)
+    sql = vn.generate_sql(question=question, allow_llm_to_see_data=True)
+    # Clean the SQL before returning it
+    return clean_sql_formatting(sql)
 
 @st.cache_data(show_spinner="Checking for valid SQL ...")
 def is_sql_valid_cached(sql: str):
@@ -172,17 +208,8 @@ def is_sql_valid_cached(sql: str):
 def run_sql_cached(sql: str):
     vn = setup_vanna()
     
-    # Clean the SQL query - remove markdown formatting
-    cleaned_sql = sql.strip()
-    if cleaned_sql.startswith('```'):
-        # Remove markdown code block formatting
-        lines = cleaned_sql.split('\n')
-        cleaned_sql = '\n'.join(line for line in lines if not line.strip().startswith('```'))
-        cleaned_sql = cleaned_sql.strip()
-    
-    # Remove any language identifiers
-    if cleaned_sql.lower().startswith('sqlite'):
-        cleaned_sql = cleaned_sql[6:].strip()
+    # Clean the SQL query using the helper function
+    cleaned_sql = clean_sql_formatting(sql)
     
     # Debug info
     st.info(f"🔍 Executing SQL: {cleaned_sql}")
@@ -191,6 +218,51 @@ def run_sql_cached(sql: str):
         result = vn.run_sql(sql=cleaned_sql)
         if result is not None:
             st.success(f"✅ Query executed successfully! Found {len(result)} rows.")
+            
+            # Display the complete results
+            if len(result) > 0:
+                st.subheader("📊 Query Results")
+                
+                # Show row count and column info
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Rows", len(result))
+                with col2:
+                    st.metric("Total Columns", len(result.columns))
+                
+                # Display all results with pagination option
+                if len(result) > 100:
+                    st.warning(f"⚠️ Large result set ({len(result)} rows). Showing with pagination for better performance.")
+                    
+                    # Pagination controls
+                    page_size = st.selectbox("Rows per page:", [25, 50, 100, 200], index=1)
+                    total_pages = (len(result) - 1) // page_size + 1
+                    
+                    if total_pages > 1:
+                        page_num = st.selectbox(f"Page (1 to {total_pages}):", range(1, total_pages + 1))
+                        start_idx = (page_num - 1) * page_size
+                        end_idx = min(start_idx + page_size, len(result))
+                        
+                        st.write(f"Showing rows {start_idx + 1} to {end_idx} of {len(result)}")
+                        st.dataframe(result.iloc[start_idx:end_idx], use_container_width=True)
+                    else:
+                        st.dataframe(result, use_container_width=True)
+                else:
+                    # Show all results for smaller datasets
+                    st.dataframe(result, use_container_width=True)
+                
+                # Download option for results
+                csv_data = result.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Results as CSV",
+                    data=csv_data,
+                    file_name=f"query_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    help="Download the complete query results as a CSV file"
+                )
+            else:
+                st.info("ℹ️ Query executed successfully but returned no rows.")
+        
         return result
     except Exception as e:
         st.error(f"❌ SQL Error: {str(e)}")

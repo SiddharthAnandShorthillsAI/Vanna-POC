@@ -9,7 +9,8 @@ from vanna_calls import (
     generate_followup_cached,
     should_generate_chart_cached,
     is_sql_valid_cached,
-    generate_summary_cached
+    generate_summary_cached,
+    clean_sql_formatting
 )
 from excel_processor import create_excel_upload_page
 
@@ -17,15 +18,31 @@ avatar_url = "https://vanna.ai/img/vanna.svg"
 
 st.set_page_config(layout="wide", page_title="Vanna AI - Data Analysis & Training")
 
+def set_question(question):
+    st.session_state["my_question"] = question
+
+def reset_chat():
+    """Reset the entire chat session"""
+    st.session_state["my_question"] = None
+    st.session_state["chat_history"] = []
+    st.session_state["generated_sql"] = ""
+    st.session_state["df"] = None
+    st.session_state["last_sidebar_sql"] = ""
+
 # Navigation
 page = st.sidebar.selectbox(
     "Choose a page",
-    ["💬 Chat with Data", "📊 Upload Excel Data", "🎯 Train Vanna AI"],
-    help="Navigate between chat interface, Excel upload functionality, and Vanna training"
+    ["💬 Chat with Data", "📊 Upload Excel Data", "🔄 Batch SQL Generation", "🎯 Train Vanna AI"],
+    help="Navigate between chat interface, Excel upload, batch SQL generation, and Vanna training"
 )
 
 if page == "📊 Upload Excel Data":
     create_excel_upload_page()
+    st.stop()
+
+elif page == "🔄 Batch SQL Generation":
+    from batch_sql_generator import create_batch_sql_page
+    create_batch_sql_page()
     st.stop()
 
 elif page == "🎯 Train Vanna AI":
@@ -59,15 +76,9 @@ st.sidebar.subheader("🔧 Manual SQL Execution")
 if st.session_state.get("generated_sql") and st.session_state.get("generated_sql") != st.session_state.get("last_sidebar_sql", ""):
     st.sidebar.info("🆕 New SQL generated! Click 'Refresh SQL' to load it.")
 
-# Get the latest generated SQL
+# Get the latest generated SQL and clean it
 latest_sql = st.session_state.get("generated_sql", "")
-if latest_sql and latest_sql.startswith('```'):
-    # Clean the SQL for display in text area
-    lines = latest_sql.split('\n')
-    cleaned_lines = [line for line in lines if not line.strip().startswith('```')]
-    latest_sql = '\n'.join(cleaned_lines).strip()
-    if latest_sql.lower().startswith('sqlite'):
-        latest_sql = latest_sql[6:].strip()
+latest_sql = clean_sql_formatting(latest_sql)
 
 manual_sql = st.sidebar.text_area(
     "Enter SQL Query:",
@@ -95,7 +106,17 @@ if execute_manual_sql:
             if df_manual is not None:
                 st.session_state["df"] = df_manual
                 st.session_state["manual_execution"] = True
-                st.session_state["my_question"] = None  # Clear question to show input
+                # Add manual execution to chat history
+                st.session_state["chat_history"].append({
+                    "type": "assistant",
+                    "content": f"Manual SQL Execution: {manual_sql}",
+                    "is_sql": True
+                })
+                st.session_state["chat_history"].append({
+                    "type": "results",
+                    "df": df_manual.copy(),
+                    "question": "Manual SQL Execution"
+                })
                 st.sidebar.success(f"✅ Query executed! Found {len(df_manual)} rows.")
             else:
                 st.sidebar.error("❌ Query returned no results")
@@ -104,14 +125,10 @@ if execute_manual_sql:
     else:
         st.sidebar.warning("⚠️ Please enter a SQL query")
 
-st.sidebar.button("Reset", on_click=lambda: set_question(None), use_container_width=True)
+st.sidebar.button("Reset Chat", on_click=reset_chat, use_container_width=True)
 
 st.title("💬 Vanna AI - Chat with Your Data")
 # st.sidebar.write(st.session_state)
-
-
-def set_question(question):
-    st.session_state["my_question"] = question
 
 
 assistant_message_suggested = st.chat_message(
@@ -137,16 +154,51 @@ if my_question is None:
     )
 
 
+# Initialize chat history if it doesn't exist
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
+
+# Display chat history
+for chat_item in st.session_state["chat_history"]:
+    if chat_item["type"] == "user":
+        user_msg = st.chat_message("user")
+        user_msg.write(chat_item["content"])
+    elif chat_item["type"] == "assistant":
+        assistant_msg = st.chat_message("assistant", avatar=avatar_url)
+        if chat_item.get("is_sql"):
+            assistant_msg.code(chat_item["content"], language="sql", line_numbers=True)
+        else:
+            assistant_msg.write(chat_item["content"])
+    elif chat_item["type"] == "results":
+        # Display results from previous queries
+        if chat_item.get("df") is not None:
+            st.subheader("📊 Query Results")
+            st.dataframe(chat_item["df"])
+
 if my_question:
-    st.session_state["my_question"] = my_question
+    # Add user question to chat history
+    st.session_state["chat_history"].append({
+        "type": "user",
+        "content": my_question
+    })
+    
+    # Display the new user message
     user_message = st.chat_message("user")
     user_message.write(f"{my_question}")
 
+    # Generate SQL
     sql = generate_sql_cached(question=my_question)
 
     if sql:
         # Store the generated SQL in session state
         st.session_state["generated_sql"] = sql
+        
+        # Add SQL to chat history
+        st.session_state["chat_history"].append({
+            "type": "assistant",
+            "content": sql,
+            "is_sql": True
+        })
         
         if is_sql_valid_cached(sql=sql):
             if st.session_state.get("show_sql", True):
@@ -154,108 +206,39 @@ if my_question:
                     "assistant", avatar=avatar_url
                 )
                 assistant_message_sql.code(sql, language="sql", line_numbers=True)
+                assistant_message_sql.info("💡 Use the sidebar to execute this SQL query or edit it before running.")
                 
-                # Add manual execution button
-                col1, col2 = assistant_message_sql.columns([1, 4])
-                with col1:
-                    execute_sql = st.button("▶️ Run SQL", key=f"run_sql_{hash(sql)}", help="Click to execute the generated SQL query")
-                with col2:
-                    st.write("Click the button to execute this SQL query")
-                
-                # Execute SQL if button is clicked or auto-execute is enabled
-                should_execute = execute_sql or st.session_state.get("auto_execute_sql", False)
+                # No inline execution button - use sidebar only
+                should_execute = False
         else:
             assistant_message = st.chat_message(
                 "assistant", avatar=avatar_url
             )
             assistant_message.write(sql)
+            
+            # Add error message to chat history
+            st.session_state["chat_history"].append({
+                "type": "assistant",
+                "content": f"Invalid SQL generated: {sql}",
+                "is_sql": False
+            })
             should_execute = False
 
-        # Execute SQL only if requested
-        if should_execute and sql:
-            df = run_sql_cached(sql=sql)
-        else:
-            df = None
-
-        if df is not None:
-            st.session_state["df"] = df
-        
-        # Clear the question after SQL execution attempt to show input again
-        if should_execute:
-            st.session_state["my_question"] = None
-
-        if st.session_state.get("df") is not None:
-            if st.session_state.get("show_table", True):
-                df = st.session_state.get("df")
-                assistant_message_table = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                if len(df) > 10:
-                    assistant_message_table.text("First 10 rows of data")
-                    assistant_message_table.dataframe(df.head(10))
-                else:
-                    assistant_message_table.dataframe(df)
-
-            if should_generate_chart_cached(question=my_question, sql=sql, df=df):
-
-                code = generate_plotly_code_cached(question=my_question, sql=sql, df=df)
-
-                if st.session_state.get("show_plotly_code", False):
-                    assistant_message_plotly_code = st.chat_message(
-                        "assistant",
-                        avatar=avatar_url,
-                    )
-                    assistant_message_plotly_code.code(
-                        code, language="python", line_numbers=True
-                    )
-
-                if code is not None and code != "":
-                    if st.session_state.get("show_chart", True):
-                        assistant_message_chart = st.chat_message(
-                            "assistant",
-                            avatar=avatar_url,
-                        )
-                        fig = generate_plot_cached(code=code, df=df)
-                        if fig is not None:
-                            assistant_message_chart.plotly_chart(fig)
-                        else:
-                            assistant_message_chart.error("I couldn't generate a chart")
-
-            if st.session_state.get("show_summary", True):
-                assistant_message_summary = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                summary = generate_summary_cached(question=my_question, df=df)
-                if summary is not None:
-                    assistant_message_summary.text(summary)
-
-            if st.session_state.get("show_followup", True):
-                assistant_message_followup = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                followup_questions = generate_followup_cached(
-                    question=my_question, sql=sql, df=df
-                )
-                st.session_state["df"] = None
-
-                if len(followup_questions) > 0:
-                    assistant_message_followup.text(
-                        "Here are some possible follow-up questions"
-                    )
-                    # Print the first 5 follow-up questions
-                    for i, question in enumerate(followup_questions[:5]):
-                        assistant_message_followup.button(question, on_click=set_question, args=(question,), key=f"followup_question_{i}")
-                
-                # Clear the question after processing to show input again
-                st.session_state["my_question"] = None
+        # SQL execution is now handled only through the sidebar
+        # No automatic execution from chat interface
 
     else:
         assistant_message_error = st.chat_message(
             "assistant", avatar=avatar_url
         )
         assistant_message_error.error("I wasn't able to generate SQL for that question")
-        # Clear the question to show input again
-        st.session_state["my_question"] = None
+        
+        # Add error to chat history
+        st.session_state["chat_history"].append({
+            "type": "assistant",
+            "content": "I wasn't able to generate SQL for that question",
+            "is_sql": False
+        })
+    
+    # Clear the current question to allow new input
+    st.session_state["my_question"] = None
