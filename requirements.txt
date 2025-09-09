@@ -1,3 +1,9 @@
 vanna
 streamlit
 python-dotenv
+pandas
+openpyxl
+sqlalchemy
+weaviate-client
+fastembed
+google-generativeai

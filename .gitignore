@@ -162,3 +162,11 @@ cython_debug/
 .DS_Store
 
 .streamlit/secrets.toml
+
+# Excel data databases
+excel_data.db
+*.db
+*.sqlite
+
+# Generated files from Excel processing
+generated_files/
