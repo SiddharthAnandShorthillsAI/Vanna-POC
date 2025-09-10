@@ -3,6 +3,7 @@ import streamlit as st
 from vanna_calls import (
     generate_questions_cached,
     generate_sql_cached,
+    generate_sql_with_context,
     run_sql_cached,
     generate_plotly_code_cached,
     generate_plot_cached,
@@ -61,6 +62,7 @@ elif page == "🎯 Train Vanna AI":
 st.sidebar.title("Output Settings")
 st.sidebar.checkbox("Show SQL", value=True, key="show_sql")
 st.sidebar.checkbox("Auto-Execute SQL", value=False, key="auto_execute_sql", help="Automatically run SQL queries without clicking the button")
+st.sidebar.checkbox("Contextual Q&A", value=True, key="use_context", help="Use conversation history for better contextual understanding")
 st.sidebar.divider()
 st.sidebar.checkbox("Show Table", value=True, key="show_table")
 st.sidebar.checkbox("Show Plotly Code", value=True, key="show_plotly_code")
@@ -186,8 +188,23 @@ if my_question:
     user_message = st.chat_message("user")
     user_message.write(f"{my_question}")
 
-    # Generate SQL
-    sql = generate_sql_cached(question=my_question)
+    # Generate SQL with or without context
+    use_context = st.session_state.get("use_context", True)
+    has_history = len(st.session_state.get("chat_history", [])) > 0
+    
+    if use_context and has_history:
+        # Use contextual generation with chat history
+        with st.spinner("🧠 Generating SQL with conversation context..."):
+            sql = generate_sql_with_context(question=my_question, chat_history=st.session_state["chat_history"])
+        # Show context indicator
+        st.info(f"🧠 **Contextual Q&A Active**: Using {len([item for item in st.session_state['chat_history'] if item['type'] in ['user', 'assistant', 'results']])} previous conversation items for context.")
+    else:
+        # Use standard generation without context
+        sql = generate_sql_cached(question=my_question)
+        if use_context and not has_history:
+            st.info("💡 **First Question**: Contextual Q&A will activate after your first query.")
+        elif not use_context:
+            st.info("⚙️ **Standard Mode**: Contextual Q&A is disabled in sidebar settings.")
 
     if sql:
         # Store the generated SQL in session state

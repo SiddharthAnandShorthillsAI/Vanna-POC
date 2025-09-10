@@ -200,6 +200,70 @@ def generate_sql_cached(question: str):
     # Clean the SQL before returning it
     return clean_sql_formatting(sql)
 
+def build_conversation_context(chat_history: list, max_items: int = 10) -> str:
+    """Build a formatted conversation context from chat history"""
+    if not chat_history or len(chat_history) == 0:
+        return ""
+    
+    context_prompt = "\n\n--- CONVERSATION CONTEXT ---\n"
+    context_prompt += "Previous questions, SQL queries, and results in this conversation:\n\n"
+    
+    for i, chat_item in enumerate(chat_history[-max_items:]):  # Last N items for context
+        if chat_item["type"] == "user":
+            context_prompt += f"Q{i+1}: {chat_item['content']}\n"
+        elif chat_item["type"] == "assistant" and chat_item.get("is_sql"):
+            context_prompt += f"SQL{i+1}: {chat_item['content']}\n"
+        elif chat_item["type"] == "results" and chat_item.get("df") is not None:
+            df = chat_item["df"]
+            # Add summary of results
+            context_prompt += f"RESULT{i+1}: Query returned {len(df)} rows"
+            if len(df) > 0:
+                context_prompt += f" with columns: {', '.join(df.columns.tolist())}"
+                # Add sample of first few rows for context
+                if len(df) <= 3:
+                    context_prompt += f"\nSample data:\n{df.to_string(index=False)}"
+                else:
+                    context_prompt += f"\nSample data (first 3 rows):\n{df.head(3).to_string(index=False)}"
+            context_prompt += "\n\n"
+    
+    context_prompt += "--- END CONTEXT ---\n\n"
+    return context_prompt
+
+def generate_sql_with_context(question: str, chat_history: list = None):
+    """Generate SQL with conversation context for better contextual understanding"""
+    vn = setup_vanna()
+    
+    # Build context from chat history
+    if chat_history and len(chat_history) > 0:
+        context_prompt = build_conversation_context(chat_history)
+        context_prompt += f"Based on the above conversation context, please generate SQL for this new question: {question}"
+    else:
+        context_prompt = question
+    
+    # Generate SQL with context
+    sql = vn.generate_sql(question=context_prompt, allow_llm_to_see_data=True)
+    return clean_sql_formatting(sql)
+
+def generate_contextual_explanation(question: str, sql: str, chat_history: list = None):
+    """Generate explanation with conversation context"""
+    vn = setup_vanna()
+    
+    explanation_prompt = f"Question: {question}\nSQL: {sql}\n\n"
+    
+    if chat_history and len(chat_history) > 0:
+        context = build_conversation_context(chat_history)
+        explanation_prompt = context + explanation_prompt + "\nBased on the conversation context above, please explain this SQL query and how it relates to the previous questions and results."
+    else:
+        explanation_prompt += "Please explain this SQL query."
+    
+    # Use Vanna's generate_explanation or submit_prompt directly
+    try:
+        explanation = vn.generate_explanation(question=question, sql=sql)
+        return explanation
+    except:
+        # Fallback to direct prompt if generate_explanation doesn't work
+        return vn.submit_prompt(explanation_prompt)
+
 @st.cache_data(show_spinner="Checking for valid SQL ...")
 def is_sql_valid_cached(sql: str):
     vn = setup_vanna()
